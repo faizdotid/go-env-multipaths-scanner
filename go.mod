@@ -1,3 +1,3 @@
-module go-env-multipath-scan
+module go-env-multipaths-scanner
 
-go 1.22.0
+go 1.23

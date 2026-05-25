@@ -1,81 +1,112 @@
 package app
 
 import (
+	"context"
 	"crypto/tls"
-	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 )
 
-type EnvScanner struct {
-	Paths  []string
-	Client *http.Client
+// Scanner probes URLs for exposed .env files.
+type Scanner struct {
+	client    *http.Client
+	paths     []string
+	writer    *ResultWriter
+	foundURLs sync.Map
 }
 
-func NewEnvScanner(paths []string) *EnvScanner {
-	return &EnvScanner{
-		Paths: paths,
-		Client: &http.Client{
-			Timeout: 10 * time.Second,
+// NewScanner creates a new Scanner instance.
+func NewScanner(paths []string, timeout time.Duration, writer *ResultWriter) *Scanner {
+	return &Scanner{
+		paths: paths,
+		client: &http.Client{
+			Timeout: timeout,
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: true,
-				},
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 			},
 		},
+		writer: writer,
 	}
 }
 
-func (e *EnvScanner) Runner(urls []string, thread int) {
-	var threadChan = make(chan struct{}, thread)
+// Run starts the worker pool and processes all targets.
+func (s *Scanner) Run(ctx context.Context, urls []string, workers int) {
+	jobs := make(chan string, workers)
 	var wg sync.WaitGroup
-	for _, url := range urls {
-		threadChan <- struct{}{}
+
+	for i := 0; i < workers; i++ {
 		wg.Add(1)
-		go func(url string) {
+		go func() {
 			defer wg.Done()
-			e.Scan(url)
-			<-threadChan
-		}(url)
+			for target := range jobs {
+				s.scanURL(ctx, target)
+			}
+		}()
 	}
+
+	for _, u := range urls {
+		jobs <- u
+	}
+	close(jobs)
 	wg.Wait()
 }
 
-func (e *EnvScanner) Scan(url string) {
-	if !strings.Contains(url, "://") {
-		url = "http://" + url
+func (s *Scanner) scanURL(ctx context.Context, base string) {
+	if !strings.Contains(base, "://") {
+		base = "http://" + base
 	}
-	for _, path := range e.Paths {
-		returnValue := e.Request(MergeUrlAndPath(url, path))
-		if returnValue {
-			break
+
+	// Skip if this URL was already matched by another worker.
+	if _, found := s.foundURLs.Load(base); found {
+		return
+	}
+
+	for _, path := range s.paths {
+		if _, found := s.foundURLs.Load(base); found {
+			return
+		}
+
+		target, err := url.JoinPath(base, path)
+		if err != nil {
+			continue
+		}
+
+		if s.request(ctx, target, base) {
+			s.foundURLs.Store(base, true)
+			return
 		}
 	}
 }
 
-func (e *EnvScanner) Request(url string) bool {
-	RecoverIfPanic()
-	resp, err := e.Client.Get(url)
+func (s *Scanner) request(ctx context.Context, target, base string) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		LogError(err)
+		return false
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
 		return false
 	}
 	defer resp.Body.Close()
-	bodyBuffer, err := io.ReadAll(resp.Body)
+
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		LogError(err)
 		return false
 	}
-	bodyString := string(bodyBuffer)
-	if (strings.Contains(bodyString, "APP_KEY=base64")) && !strings.Contains(bodyString, "Laravel") {
-		fmt.Printf("%s%s %s%s-> %sOK%s\n", White, url, Reset, Blue, Green, Reset)
-		WriteResultToFile(url)
+
+	bodyStr := string(body)
+	if strings.Contains(bodyStr, "APP_KEY=base64") && !strings.Contains(bodyStr, "Laravel") {
+		PrintOK(base)
+		if s.writer != nil {
+			_ = s.writer.Write(base)
+		}
 		return true
-	} else {
-		fmt.Printf("%s%s %s%s-> %sBAD%s\n", White, url, Reset, Blue, Red, Reset)
-		return false
 	}
+	return false
 }

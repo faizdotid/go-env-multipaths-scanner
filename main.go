@@ -1,20 +1,39 @@
 package main
 
 import (
-	"go-env-multipath-scan/app"
+	"context"
+	"fmt"
+	"go-env-multipaths-scanner/app"
+	"os"
+	"time"
 )
 
 func main() {
-	defer app.RecoverIfPanic()
-	paths, err := app.LoadPathsFromFile("./config/paths.txt")
+	opts := app.ParseFlags()
+
+	paths, err := app.LoadPaths(opts.PathsFile)
 	if err != nil {
-		panic(err)
+		fmt.Fprintf(os.Stderr, "Error loading paths: %v\n", err)
+		os.Exit(1)
 	}
-	parseFlag := app.ParseFlag()
-	urls, err := app.LoadPathsFromFile(parseFlag.Filename)
+
+	urls, err := app.LoadPaths(opts.TargetsFile)
 	if err != nil {
-		panic(err)
+		fmt.Fprintf(os.Stderr, "Error loading targets: %v\n", err)
+		os.Exit(1)
 	}
-	envScanner := app.NewEnvScanner(paths)
-	envScanner.Runner(urls, parseFlag.Thread)
+
+	writer, err := app.NewResultWriter(opts.Output)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating writer: %v\n", err)
+		os.Exit(1)
+	}
+	defer writer.Close()
+
+	scanner := app.NewScanner(paths, time.Duration(opts.Timeout)*time.Second, writer)
+	ctx := context.Background()
+
+	fmt.Printf("Scanning %d targets with %d workers (timeout: %ds)\n\n",
+		len(urls), opts.Workers, opts.Timeout)
+	scanner.Run(ctx, urls, opts.Workers)
 }

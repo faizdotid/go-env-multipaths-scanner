@@ -1,0 +1,16 @@
+# Output files
+result.txt
+*.txt
+!config/*.txt
+
+# Binaries
+go-env-multipaths-scanner
+*.exe
+*.out
+*.dll
+*.so
+*.dylib
+
+# IDE
+.idea/
+.vscode/
