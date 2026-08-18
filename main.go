@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"go-env-multipaths-scanner/app"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 )
 
@@ -30,8 +32,9 @@ func main() {
 	}
 	defer writer.Close()
 
-	scanner := app.NewScanner(paths, time.Duration(opts.Timeout)*time.Second, writer)
-	ctx := context.Background()
+	scanner := app.NewScanner(paths, time.Duration(opts.Timeout)*time.Second, writer, opts.Insecure)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	fmt.Printf("Scanning %d targets with %d workers (timeout: %ds)\n\n",
 		len(urls), opts.Workers, opts.Timeout)

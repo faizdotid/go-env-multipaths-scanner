@@ -11,12 +11,9 @@ import (
 )
 
 const (
-	Red    = "\033[31m"
-	Green  = "\033[32m"
-	Blue   = "\033[34m"
-	White  = "\033[1;37m"
-	Reset  = "\033[0m"
-	Yellow = "\033[33m"
+	Green = "\033[32m"
+	Blue  = "\033[34m"
+	Reset = "\033[0m"
 )
 
 var printMu sync.Mutex
@@ -28,6 +25,7 @@ type Options struct {
 	Workers     int
 	Timeout     int
 	Output      string
+	Insecure    bool
 }
 
 // ParseFlags parses and validates CLI flags.
@@ -38,16 +36,26 @@ func ParseFlags() Options {
 	flag.IntVar(&opts.Workers, "t", 20, "Number of concurrent workers")
 	flag.IntVar(&opts.Timeout, "timeout", 10, "HTTP timeout in seconds")
 	flag.StringVar(&opts.Output, "o", "result.txt", "Output file")
+	flag.BoolVar(&opts.Insecure, "insecure", true, "Skip TLS certificate verification")
 	flag.Parse()
 
 	if opts.TargetsFile == "" {
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
+	if opts.Workers < 1 {
+		fmt.Fprintf(os.Stderr, "Error: -t (workers) must be >= 1\n")
+		os.Exit(1)
+	}
+	if opts.Timeout < 1 {
+		fmt.Fprintf(os.Stderr, "Error: -timeout must be >= 1 second\n")
+		os.Exit(1)
+	}
 	return opts
 }
 
-// LoadPaths reads a file line-by-line and returns trimmed non-empty paths.
+// LoadPaths reads a file line-by-line and returns deduplicated, trimmed,
+// non-empty entries preserving their original order.
 func LoadPaths(path string) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -55,18 +63,25 @@ func LoadPaths(path string) ([]string, error) {
 	}
 	defer f.Close()
 
+	seen := make(map[string]struct{})
 	var results []string
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		if line := strings.TrimSpace(scanner.Text()); line != "" {
-			results = append(results, line)
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
 		}
+		if _, ok := seen[line]; ok {
+			continue
+		}
+		seen[line] = struct{}{}
+		results = append(results, line)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	if len(results) == 0 {
-		return nil, fmt.Errorf("no paths found in %s", path)
+		return nil, fmt.Errorf("no entries found in %s", path)
 	}
 	return results, nil
 }
@@ -117,12 +132,5 @@ func (rw *ResultWriter) Close() error {
 func PrintOK(url string) {
 	printMu.Lock()
 	defer printMu.Unlock()
-	fmt.Printf("%s[+]%s %s %s->%s %sOK%s\n", Green, Reset, url, Blue, Reset, Green, Reset)
-}
-
-// PrintErr prints an error message to stderr (thread-safe).
-func PrintErr(format string, args ...interface{}) {
-	printMu.Lock()
-	defer printMu.Unlock()
-	fmt.Fprintf(os.Stderr, "%s[-]%s %s\n", Red, Reset, fmt.Sprintf(format, args...))
+	fmt.Printf("%s[+]%s %s%sOK%s\n", Green, Reset, url, Green, Reset)
 }

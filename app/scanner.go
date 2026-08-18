@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const maxBodyBytes = 1 << 20 // 1 MiB
+
 // Scanner probes URLs for exposed .env files.
 type Scanner struct {
 	client    *http.Client
@@ -20,13 +22,16 @@ type Scanner struct {
 }
 
 // NewScanner creates a new Scanner instance.
-func NewScanner(paths []string, timeout time.Duration, writer *ResultWriter) *Scanner {
+func NewScanner(paths []string, timeout time.Duration, writer *ResultWriter, insecure bool) *Scanner {
 	return &Scanner{
 		paths: paths,
 		client: &http.Client{
 			Timeout: timeout,
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: insecure},
+			},
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
 			},
 		},
 		writer: writer,
@@ -35,6 +40,10 @@ func NewScanner(paths []string, timeout time.Duration, writer *ResultWriter) *Sc
 
 // Run starts the worker pool and processes all targets.
 func (s *Scanner) Run(ctx context.Context, urls []string, workers int) {
+	if workers < 1 {
+		workers = 1
+	}
+
 	jobs := make(chan string, workers)
 	var wg sync.WaitGroup
 
@@ -43,13 +52,22 @@ func (s *Scanner) Run(ctx context.Context, urls []string, workers int) {
 		go func() {
 			defer wg.Done()
 			for target := range jobs {
+				if ctx.Err() != nil {
+					continue
+				}
 				s.scanURL(ctx, target)
 			}
 		}()
 	}
 
 	for _, u := range urls {
-		jobs <- u
+		select {
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return
+		case jobs <- u:
+		}
 	}
 	close(jobs)
 	wg.Wait()
@@ -66,6 +84,9 @@ func (s *Scanner) scanURL(ctx context.Context, base string) {
 	}
 
 	for _, path := range s.paths {
+		if ctx.Err() != nil {
+			return
+		}
 		if _, found := s.foundURLs.Load(base); found {
 			return
 		}
@@ -75,14 +96,18 @@ func (s *Scanner) scanURL(ctx context.Context, base string) {
 			continue
 		}
 
-		if s.request(ctx, target, base) {
+		if s.request(ctx, target) {
 			s.foundURLs.Store(base, true)
+			PrintOK(target)
+			if s.writer != nil {
+				_ = s.writer.Write(target)
+			}
 			return
 		}
 	}
 }
 
-func (s *Scanner) request(ctx context.Context, target, base string) bool {
+func (s *Scanner) request(ctx context.Context, target string) bool {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return false
@@ -95,18 +120,14 @@ func (s *Scanner) request(ctx context.Context, target, base string) bool {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if err != nil {
 		return false
 	}
 
-	bodyStr := string(body)
-	if strings.Contains(bodyStr, "APP_KEY=base64") && !strings.Contains(bodyStr, "Laravel") {
-		PrintOK(base)
-		if s.writer != nil {
-			_ = s.writer.Write(base)
-		}
-		return true
-	}
-	return false
+	return strings.Contains(string(body), "APP_KEY=base64")
 }

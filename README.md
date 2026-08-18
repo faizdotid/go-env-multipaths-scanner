@@ -31,6 +31,7 @@ go build -o go-env-multipaths-scanner main.go
 | `-t` | `20` | Number of concurrent workers |
 | `-timeout` | `10` | HTTP timeout in seconds |
 | `-o` | `result.txt` | Output file for findings |
+| `-insecure` | `true` | Skip TLS certificate verification |
 
 ### Examples
 
